@@ -1,8 +1,37 @@
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
+const promClient = require('prom-client');
+
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Create a Registry and collect default metrics
+const register = new promClient.Registry();
+
+promClient.collectDefaultMetrics({
+  app: 'devops-beginner-app',
+  timeout: 10000,
+  gcDurationBuckets: [0.001, 0.01, 0.1, 1, 2, 5],
+  register
+});
+
+// Custom metrics
+const httpRequestDuration = new promClient.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.1, 0.3, 0.5, 0.7, 1, 3, 5, 7, 10]
+});
+
+const httpRequestTotal = new promClient.Counter({
+  name: 'http_requests_total',
+  help: 'Total number of HTTP requests',
+  labelNames: ['method', 'route', 'status_code']
+});
+
+register.registerMetric(httpRequestDuration);
+register.registerMetric(httpRequestTotal);
 
 // Middleware
 app.use(helmet());
@@ -12,6 +41,26 @@ app.use(express.json());
 // Logging
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+// Metrics middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  res.on('finish', () => {
+    const duration = (Date.now() - start) / 1000;
+    const route = req.route ? req.route.path : req.path;
+
+    httpRequestDuration
+      .labels(req.method, route, res.statusCode.toString())
+      .observe(duration);
+
+    httpRequestTotal
+      .labels(req.method, route, res.statusCode.toString())
+      .inc();
+  });
+
   next();
 });
 
@@ -39,6 +88,16 @@ app.get('/ready', (req, res) => {
     status: 'ready',
     timestamp: new Date().toISOString()
   });
+});
+
+// Metrics endpoint
+app.get('/metrics', async (req, res) => {
+  try {
+    res.set('Content-Type', register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err);
+  }
 });
 
 // 500 error handler
